@@ -27,15 +27,17 @@ class Competitor:
 
 @dataclass(frozen=True)
 class Team:
-    """A team of 2 competitors racing together."""
+    """
+    A team of 2 competitors racing together.
+    
+    The order matters for boat positions:
+    - competitor1 is in the first boat position (7 for team_a, 10 for team_b)
+    - competitor2 is in the second boat position (8 for team_a, 11 for team_b)
+    """
     competitor1: Competitor
     competitor2: Competitor
 
-    def __post_init__(self) -> None:
-        # Ensure consistent ordering for equality/hashing
-        if self.competitor1.id > self.competitor2.id:
-            object.__setattr__(self, "competitor1", self.competitor2)
-            object.__setattr__(self, "competitor2", self.competitor1)
+    # NOTE: No auto-reordering - order matters for boat positions!
 
     @property
     def competitors(self) -> frozenset[Competitor]:

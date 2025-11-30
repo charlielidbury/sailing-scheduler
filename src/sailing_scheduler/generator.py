@@ -1,9 +1,10 @@
 """Schedule generation logic."""
 
+import random
+from itertools import combinations
+
 from .models import (
     NUM_COMPETITORS,
-    NUM_RACES,
-    RACES_PER_COMPETITOR,
     BoatSet,
     Competitor,
     Race,
@@ -14,262 +15,541 @@ from .models import (
 
 def generate_schedule() -> Schedule:
     """
-    Generate a valid sailing competition schedule.
+    Generate a valid sailing competition schedule maximizing visibility and proper double outings.
     
-    The schedule must satisfy the following requirements:
-    1. No competitor can race in adjacent races (N and N+1 overlap)
-    2. Each competitor participates in exactly 8 races
-    3. Each competitor has unique teammates in all 8 races
-    4. Prefer two-race-per-outing pattern (race N then race N+2)
-    5. Minimize single-race-outings
-    6. Schedule should be interruptible via rounds (each competitor races twice per round)
-    
-    Returns:
-        A Schedule object containing all races and competitors.
+    Uses a chain structure where consecutive races share 2 competitors,
+    giving each person ~5 unique others per round instead of 3.
     """
-    # Create all competitors
     competitors = [
         Competitor(id=i, name=f"Competitor_{i}")
         for i in range(NUM_COMPETITORS)
     ]
     
-    # Generate the schedule using a round-based approach
-    # 4 rounds × 12 races = 48 races total
-    # Each competitor races exactly twice per round (via double-outings)
+    # Try multiple seeds to find a valid schedule
+    best_schedule = None
+    best_proper_double_outings = 0
     
-    races = _generate_round_based_schedule(competitors)
+    for seed in range(200):
+        random.seed(seed)
+        races = _try_generate_chain_schedule(competitors)
+        if races is not None:
+            # Apply opportunistic team swaps to improve double outings
+            races = _optimize_double_outings(races)
+            
+            schedule = Schedule(races=races, competitors=competitors)
+            
+            # Check opponent diversity
+            min_opponents = 24
+            for c in competitors:
+                opponents: set[int] = set()
+                for race in schedule.get_races_for_competitor(c):
+                    if c in race.team_a.competitors:
+                        for opp in race.team_b.competitors:
+                            opponents.add(opp.id)
+                    else:
+                        for opp in race.team_a.competitors:
+                            opponents.add(opp.id)
+                min_opponents = min(min_opponents, len(opponents))
+            
+            if min_opponents < 12:
+                continue  # Doesn't meet minimum opponent diversity
+            
+            # Count proper double outings
+            proper_double_outings = 0
+            for c in competitors:
+                comp_races = sorted(schedule.get_races_for_competitor(c), key=lambda r: r.race_number)
+                i = 0
+                while i < len(comp_races) - 1:
+                    r1, r2 = comp_races[i], comp_races[i + 1]
+                    if r1.boat_set == r2.boat_set and r2.race_number == r1.race_number + 2:
+                        pos1 = _get_boat_position(r1, c)
+                        pos2 = _get_boat_position(r2, c)
+                        if pos1 == pos2:
+                            proper_double_outings += 1
+                        i += 2
+                    else:
+                        i += 1
+            
+            if proper_double_outings > best_proper_double_outings:
+                best_proper_double_outings = proper_double_outings
+                best_schedule = schedule
     
-    return Schedule(races=races, competitors=competitors)
+    if best_schedule is not None:
+        return best_schedule
+    
+    raise RuntimeError("Could not generate valid schedule")
 
 
-def _generate_round_based_schedule(competitors: list[Competitor]) -> list[Race]:
-    """
-    Generate races using a round-based structure.
-    
-    Structure per round (12 races):
-    - Boat set A: races at positions 1,3,5,7,9,11 (odd indices)
-    - Boat set B: races at positions 2,4,6,8,10,12 (even indices)
-    
-    Double-outing time slots per round:
-    - Boat A: (race 1, race 3), (race 5, race 7), (race 9, race 11)
-    - Boat B: (race 2, race 4), (race 6, race 8), (race 10, race 12)
-    
-    Each time slot has 4 competitors who race twice together.
-    This gives 3 slots × 4 competitors × 2 boat sets = 24 competitors per round.
-    Each competitor gets 2 races per round, for a total of 8 races over 4 rounds.
-    """
+def _try_generate_chain_schedule(competitors: list[Competitor]) -> list[Race] | None:
+    """Attempt to generate a valid chain schedule."""
     races: list[Race] = []
-    
-    # Pre-compute group assignments for all 4 rounds
-    # Each round partitions 24 competitors into 6 groups of 4
-    # 3 groups for boat A, 3 groups for boat B
-    round_groups = _compute_round_groups()
-    
-    # Track used teammates to ensure uniqueness
     used_teammates: dict[int, set[int]] = {c.id: set() for c in competitors}
     
-    for round_num in range(4):
-        round_start_race = round_num * 12 + 1  # Race numbers: 1-12, 13-24, 25-36, 37-48
-        groups = round_groups[round_num]
-        
-        # Groups 0-2 are for boat A (time slots 0, 1, 2)
-        # Groups 3-5 are for boat B (time slots 0, 1, 2)
-        
-        for group_idx, group in enumerate(groups):
-            is_boat_a = group_idx < 3
-            time_slot = group_idx % 3
-            
-            boat_set = BoatSet.A if is_boat_a else BoatSet.B
-            
-            # Calculate race numbers for this time slot
-            # Boat A time slots: (1,3), (5,7), (9,11) -> offsets (0,2), (4,6), (8,10)
-            # Boat B time slots: (2,4), (6,8), (10,12) -> offsets (1,3), (5,7), (9,11)
-            if is_boat_a:
-                race_offset_1 = time_slot * 4  # 0, 4, 8
-                race_offset_2 = race_offset_1 + 2  # 2, 6, 10
-            else:
-                race_offset_1 = time_slot * 4 + 1  # 1, 5, 9
-                race_offset_2 = race_offset_1 + 2  # 3, 7, 11
-            
-            race_num_1 = round_start_race + race_offset_1
-            race_num_2 = round_start_race + race_offset_2
-            
-            # Get the 4 competitors in this group
-            group_competitors = [competitors[cid] for cid in group]
-            
-            # Generate the two races for this double-outing
-            # Teammate pairing: in race 1, (0,1) vs (2,3); in race 2, (0,2) vs (1,3)
-            # This ensures each person gets 2 unique teammates per round
-            c0, c1, c2, c3 = group_competitors
-            
-            # Determine teammate pairings based on what's already used
-            team_pairs = _select_teammate_pairs(c0, c1, c2, c3, used_teammates)
-            
-            # Race 1
-            race1 = Race(
-                race_number=race_num_1,
-                boat_set=boat_set,
-                team_a=Team(team_pairs[0][0], team_pairs[0][1]),
-                team_b=Team(team_pairs[1][0], team_pairs[1][1]),
-            )
-            
-            # Race 2
-            race2 = Race(
-                race_number=race_num_2,
-                boat_set=boat_set,
-                team_a=Team(team_pairs[2][0], team_pairs[2][1]),
-                team_b=Team(team_pairs[3][0], team_pairs[3][1]),
-            )
-            
-            races.append(race1)
-            races.append(race2)
-            
-            # Update used teammates
-            for pair in team_pairs:
-                used_teammates[pair[0].id].add(pair[1].id)
-                used_teammates[pair[1].id].add(pair[0].id)
+    # Track which competitor pairs have been in the same race (could become teammates)
+    race_coappearances: dict[int, set[int]] = {c.id: set() for c in competitors}
     
-    # Sort races by race number
+    # Boundary constraint for adjacent races (boat_b last race -> boat_a first race)
+    prev_adjacent_boundary: set[int] = set()
+    
+    # Boundary constraints for consecutive races on SAME boat set
+    # Positions 10, 11 race in the last two chain races of a round
+    # Positions 0-3 race in the first chain race of a round
+    # To prevent 3+ consecutive races, pos 10,11 in round N must not be pos 0-3 in round N+1
+    prev_boat_a_boundary: set[int] = set()  # boat_a positions 10, 11 from last round
+    prev_boat_b_boundary: set[int] = set()  # boat_b positions 10, 11 from last round
+    
+    for round_num in range(4):
+        round_start = round_num * 12 + 1
+        
+        # Find valid boat assignments for this round
+        boat_a, boat_b = _find_round_assignment(
+            used_teammates, 
+            race_coappearances, 
+            prev_adjacent_boundary,
+            prev_boat_a_boundary,
+            prev_boat_b_boundary,
+            round_num
+        )
+        
+        if boat_a is None:
+            return None
+        
+        boat_a_comps = [competitors[i] for i in boat_a]
+        boat_b_comps = [competitors[i] for i in boat_b]
+        
+        boat_a_nums = [round_start + i * 2 for i in range(6)]
+        boat_b_nums = [round_start + 1 + i * 2 for i in range(6)]
+        
+        # Generate races and track teammate usage
+        boat_a_races = _generate_chain_races_careful(
+            BoatSet.A, boat_a_nums, boat_a_comps, used_teammates
+        )
+        boat_b_races = _generate_chain_races_careful(
+            BoatSet.B, boat_b_nums, boat_b_comps, used_teammates
+        )
+        
+        if boat_a_races is None or boat_b_races is None:
+            return None
+        
+        # Update co-appearance tracking
+        chain = [[0,1,2,3], [2,3,4,5], [4,5,6,7], [6,7,8,9], [8,9,10,11], [10,11,0,1]]
+        for group in chain:
+            for i in group:
+                for j in group:
+                    if i != j:
+                        race_coappearances[boat_a[i]].add(boat_a[j])
+                        race_coappearances[boat_b[i]].add(boat_b[j])
+        
+        races.extend(boat_a_races)
+        races.extend(boat_b_races)
+        
+        # Update boundaries for next round
+        # Adjacent race boundary: boat_b last race positions -> boat_a first race
+        prev_adjacent_boundary = {boat_b[0], boat_b[1], boat_b[10], boat_b[11]}
+        
+        # Same-boat consecutive boundary: ALL positions in last chain race [10, 11, 0, 1]
+        # These must not be at positions 0-3 (first chain race) of next round
+        prev_boat_a_boundary = {boat_a[0], boat_a[1], boat_a[10], boat_a[11]}
+        prev_boat_b_boundary = {boat_b[0], boat_b[1], boat_b[10], boat_b[11]}
+    
     races.sort(key=lambda r: r.race_number)
+    return races
+
+
+def _find_round_assignment(
+    used_teammates: dict[int, set[int]],
+    race_coappearances: dict[int, set[int]],
+    prev_adjacent_boundary: set[int],
+    prev_boat_a_boundary: set[int],
+    prev_boat_b_boundary: set[int],
+    round_num: int,
+) -> tuple[list[int] | None, list[int] | None]:
+    """
+    Find valid boat assignments for a round.
+    
+    Constraints:
+    1. 12 competitors per boat
+    2. Adjacent race boundary: prev_adjacent_boundary members not in boat_a positions 0-3
+       (prevents racing in races N and N+1 which overlap)
+    3. Same-boat consecutive boundary: prev_boat_a_boundary not in boat_a positions 0-3,
+       prev_boat_b_boundary not in boat_b positions 0-3
+       (prevents 3+ consecutive races on same boat set)
+    4. Minimize teammate conflicts
+    """
+    all_ids = list(range(24))
+    random.shuffle(all_ids)
+    
+    # Split into two boats
+    boat_a = all_ids[:12]
+    boat_b = all_ids[12:]
+    
+    # Combined boundary for boat_a: both adjacent and same-boat constraints
+    boat_a_forbidden = prev_adjacent_boundary | prev_boat_a_boundary
+    
+    # Combined boundary for boat_b: same-boat constraint
+    boat_b_forbidden = prev_boat_b_boundary
+    
+    # Ensure boat_a positions 0-3 don't have forbidden members
+    if boat_a_forbidden:
+        forbidden_in_a = [x for x in boat_a if x in boat_a_forbidden]
+        safe_in_a = [x for x in boat_a if x not in boat_a_forbidden]
+        
+        if len(safe_in_a) < 4:
+            # Need to swap some forbidden out of boat_a to boat_b
+            needed = 4 - len(safe_in_a)
+            # Find safe members in boat_b (not forbidden for boat_a)
+            safe_in_b = [x for x in boat_b if x not in boat_a_forbidden]
+            
+            to_move_to_b = forbidden_in_a[:needed]
+            to_move_to_a = safe_in_b[:needed]
+            
+            boat_a = [x for x in boat_a if x not in to_move_to_b] + to_move_to_a
+            boat_b = [x for x in boat_b if x not in to_move_to_a] + to_move_to_b
+            
+            forbidden_in_a = [x for x in boat_a if x in boat_a_forbidden]
+            safe_in_a = [x for x in boat_a if x not in boat_a_forbidden]
+        
+        # Reorder: safe in positions 0-3, forbidden in 4+
+        boat_a = safe_in_a[:4] + forbidden_in_a + safe_in_a[4:]
+    
+    # Ensure boat_b positions 0-3 don't have forbidden members
+    if boat_b_forbidden:
+        forbidden_in_b = [x for x in boat_b if x in boat_b_forbidden]
+        safe_in_b = [x for x in boat_b if x not in boat_b_forbidden]
+        
+        if len(safe_in_b) < 4:
+            # Need to swap some forbidden out of boat_b to boat_a
+            needed = 4 - len(safe_in_b)
+            # Find safe members in boat_a that can go to boat_b
+            # (must not be in positions 0-3 of boat_a if boat_a_forbidden)
+            available_in_a = boat_a[4:] if boat_a_forbidden else boat_a
+            safe_for_b = [x for x in available_in_a if x not in boat_b_forbidden]
+            
+            to_move_to_a = forbidden_in_b[:needed]
+            to_move_to_b = safe_for_b[:needed]
+            
+            # Update boats
+            new_boat_b = [x for x in boat_b if x not in to_move_to_a] + to_move_to_b
+            new_boat_a = [x for x in boat_a if x not in to_move_to_b] + to_move_to_a
+            
+            # Re-apply boat_a constraint
+            if boat_a_forbidden:
+                forbidden_in_a = [x for x in new_boat_a if x in boat_a_forbidden]
+                safe_in_a = [x for x in new_boat_a if x not in boat_a_forbidden]
+                boat_a = safe_in_a[:4] + forbidden_in_a + safe_in_a[4:]
+            else:
+                boat_a = new_boat_a
+            
+            forbidden_in_b = [x for x in new_boat_b if x in boat_b_forbidden]
+            safe_in_b = [x for x in new_boat_b if x not in boat_b_forbidden]
+            boat_b = new_boat_b
+        
+        # Reorder boat_b: safe in positions 0-3, forbidden in 4+
+        boat_b = safe_in_b[:4] + forbidden_in_b + safe_in_b[4:]
+    
+    # Verify constraints
+    if boat_a_forbidden:
+        assert not any(boat_a[i] in boat_a_forbidden for i in range(4)), \
+            f"Boat A boundary violated: positions 0-3 = {boat_a[:4]}, forbidden = {boat_a_forbidden}"
+    if boat_b_forbidden:
+        assert not any(boat_b[i] in boat_b_forbidden for i in range(4)), \
+            f"Boat B boundary violated: positions 0-3 = {boat_b[:4]}, forbidden = {boat_b_forbidden}"
+    
+    # Optimize ordering to minimize teammate conflicts
+    chain = [[0,1,2,3], [2,3,4,5], [4,5,6,7], [6,7,8,9], [8,9,10,11], [10,11,0,1]]
+    
+    def count_conflicts(ordering: list[int]) -> int:
+        conflicts = 0
+        for group in chain:
+            for i in range(len(group)):
+                for j in range(i+1, len(group)):
+                    c1, c2 = ordering[group[i]], ordering[group[j]]
+                    if c2 in used_teammates[c1]:
+                        conflicts += 1
+        return conflicts
+    
+    def is_valid_a(ordering: list[int]) -> bool:
+        if not boat_a_forbidden:
+            return True
+        return not any(ordering[i] in boat_a_forbidden for i in range(4))
+    
+    def is_valid_b(ordering: list[int]) -> bool:
+        if not boat_b_forbidden:
+            return True
+        return not any(ordering[i] in boat_b_forbidden for i in range(4))
+    
+    # Optimize boat_a (keeping boundary constraint)
+    best_a = boat_a[:]
+    best_a_conflicts = count_conflicts(best_a)
+    
+    for _ in range(1000):
+        new_a = best_a[:]
+        # Only swap within safe zone (0-3) or within rest (4-11) to maintain constraint
+        if boat_a_forbidden:
+            if random.random() < 0.3:
+                i, j = random.sample(range(4), 2)
+            else:
+                i, j = random.sample(range(4, 12), 2)
+        else:
+            i, j = random.sample(range(12), 2)
+        new_a[i], new_a[j] = new_a[j], new_a[i]
+        
+        if is_valid_a(new_a):
+            new_conflicts = count_conflicts(new_a)
+            if new_conflicts < best_a_conflicts:
+                best_a = new_a
+                best_a_conflicts = new_conflicts
+    
+    # Optimize boat_b (keeping boundary constraint)
+    best_b = boat_b[:]
+    best_b_conflicts = count_conflicts(best_b)
+    
+    for _ in range(1000):
+        new_b = best_b[:]
+        if boat_b_forbidden:
+            if random.random() < 0.3:
+                i, j = random.sample(range(4), 2)
+            else:
+                i, j = random.sample(range(4, 12), 2)
+        else:
+            i, j = random.sample(range(12), 2)
+        new_b[i], new_b[j] = new_b[j], new_b[i]
+        
+        if is_valid_b(new_b):
+            new_conflicts = count_conflicts(new_b)
+            if new_conflicts < best_b_conflicts:
+                best_b = new_b
+                best_b_conflicts = new_conflicts
+    
+    return best_a, best_b
+
+
+def _generate_chain_races_careful(
+    boat_set: BoatSet,
+    race_numbers: list[int],
+    boat_competitors: list[Competitor],
+    used_teammates: dict[int, set[int]],
+) -> list[Race] | None:
+    """Generate chain races with careful teammate selection."""
+    races: list[Race] = []
+    
+    chain = [
+        [0, 1, 2, 3],
+        [2, 3, 4, 5],
+        [4, 5, 6, 7],
+        [6, 7, 8, 9],
+        [8, 9, 10, 11],
+        [10, 11, 0, 1],
+    ]
+    
+    for race_idx, race_num in enumerate(race_numbers):
+        indices = chain[race_idx]
+        race_competitors = [boat_competitors[i] for i in indices]
+        
+        team_a, team_b = _form_teams_optimally(race_competitors, used_teammates)
+        
+        race = Race(
+            race_number=race_num,
+            boat_set=boat_set,
+            team_a=team_a,
+            team_b=team_b,
+        )
+        races.append(race)
+        
+        # Update teammates
+        for c in team_a.competitors:
+            for other in team_a.competitors:
+                if c.id != other.id:
+                    used_teammates[c.id].add(other.id)
+        for c in team_b.competitors:
+            for other in team_b.competitors:
+                if c.id != other.id:
+                    used_teammates[c.id].add(other.id)
     
     return races
 
 
-def _compute_round_groups() -> list[list[list[int]]]:
-    """
-    Compute the groupings of competitors for each round.
+def _form_teams_optimally(
+    race_competitors: list[Competitor],
+    used_teammates: dict[int, set[int]],
+) -> tuple[Team, Team]:
+    """Form teams avoiding duplicate teammates."""
+    c0, c1, c2, c3 = race_competitors
     
-    Returns a list of 4 rounds, each containing 6 groups of 4 competitor IDs.
-    Groups 0-2 are assigned to boat A, groups 3-5 to boat B.
-    
-    The groupings are designed to ensure:
-    1. Each competitor appears in exactly one group per round
-    2. Over 4 rounds, no pair of competitors appears in the same group twice
-       (enabling 8 unique teammates and 12 unique opponents)
-    
-    Uses a search-based construction to find 4 mutually orthogonal partitions.
-    """
-    rounds: list[list[list[int]]] = []
-    used_pairs: set[tuple[int, int]] = set()
-    
-    def to_id(row: int, col: int) -> int:
-        return row * 6 + col
-    
-    def add_round(groups: list[list[int]]) -> None:
-        for group in groups:
-            for i in range(len(group)):
-                for j in range(i + 1, len(group)):
-                    pair = (min(group[i], group[j]), max(group[i], group[j]))
-                    used_pairs.add(pair)
-        rounds.append(groups)
-    
-    # Round 0: Group by columns - this is always valid as the first round
-    round0 = [[to_id(row, col) for row in range(4)] for col in range(6)]
-    add_round(round0)
-    
-    # Round 1: Slope +1 construction (orthogonal to round 0)
-    round1 = [[to_id(row, (g + row) % 6) for row in range(4)] for g in range(6)]
-    add_round(round1)
-    
-    # Rounds 2 and 3: Find valid partitions using backtracking
-    for _ in range(2):
-        next_round = _find_valid_round(list(range(24)), used_pairs)
-        add_round(next_round)
-    
-    return rounds
-
-
-def _find_valid_round(
-    competitors: list[int], 
-    forbidden_pairs: set[tuple[int, int]]
-) -> list[list[int]]:
-    """
-    Find a partition of competitors into 6 groups of 4, avoiding forbidden pairs.
-    Uses backtracking search.
-    """
-    def is_valid_group(group: list[int]) -> bool:
-        """Check if all pairs in the group are allowed."""
-        for i in range(len(group)):
-            for j in range(i + 1, len(group)):
-                pair = (min(group[i], group[j]), max(group[i], group[j]))
-                if pair in forbidden_pairs:
-                    return False
-        return True
-    
-    def backtrack(remaining: list[int], groups: list[list[int]]) -> list[list[int]] | None:
-        if not remaining:
-            return groups
-        
-        if len(remaining) < 4:
-            return None
-        
-        # Try to form a group starting with the first remaining competitor
-        first = remaining[0]
-        rest = remaining[1:]
-        
-        # Try all combinations of 3 more competitors from the rest
-        from itertools import combinations
-        for combo in combinations(rest, 3):
-            group = [first] + list(combo)
-            if is_valid_group(group):
-                new_remaining = [c for c in rest if c not in combo]
-                result = backtrack(new_remaining, groups + [group])
-                if result is not None:
-                    return result
-        
-        return None
-    
-    result = backtrack(competitors, [])
-    if result is None:
-        # Fallback: return a simple partition (will fail validation but indicates issue)
-        return [competitors[i:i+4] for i in range(0, 24, 4)]
-    return result
-
-
-def _select_teammate_pairs(
-    c0: Competitor, c1: Competitor, c2: Competitor, c3: Competitor,
-    used_teammates: dict[int, set[int]]
-) -> list[tuple[Competitor, Competitor]]:
-    """
-    Select teammate pairings for 2 races with 4 competitors.
-    
-    Returns 4 pairs: [race1_team_a, race1_team_b, race2_team_a, race2_team_b]
-    
-    Tries to select pairings that don't reuse teammates.
-    """
-    competitors = [c0, c1, c2, c3]
-    
-    # All possible ways to partition 4 competitors into 2 pairs for 2 races
-    # such that each person gets 2 different teammates
-    #
-    # Option A: Race1: (0,1) vs (2,3), Race2: (0,2) vs (1,3)
-    # Option B: Race1: (0,1) vs (2,3), Race2: (0,3) vs (1,2)
-    # Option C: Race1: (0,2) vs (1,3), Race2: (0,1) vs (2,3)
-    # Option D: Race1: (0,2) vs (1,3), Race2: (0,3) vs (1,2)
-    # Option E: Race1: (0,3) vs (1,2), Race2: (0,1) vs (2,3)
-    # Option F: Race1: (0,3) vs (1,2), Race2: (0,2) vs (1,3)
-    
-    options = [
-        [(0,1), (2,3), (0,2), (1,3)],  # Option A
-        [(0,1), (2,3), (0,3), (1,2)],  # Option B
-        [(0,2), (1,3), (0,1), (2,3)],  # Option C
-        [(0,2), (1,3), (0,3), (1,2)],  # Option D
-        [(0,3), (1,2), (0,1), (2,3)],  # Option E
-        [(0,3), (1,2), (0,2), (1,3)],  # Option F
+    formations = [
+        ((c0, c1), (c2, c3)),
+        ((c0, c2), (c1, c3)),
+        ((c0, c3), (c1, c2)),
     ]
     
-    # Try to find an option where no teammate pair is already used
-    for option in options:
-        valid = True
-        for i, j in option:
-            ci, cj = competitors[i], competitors[j]
-            if cj.id in used_teammates[ci.id]:
-                valid = False
-                break
-        
-        if valid:
-            return [(competitors[i], competitors[j]) for i, j in option]
+    best_formation = formations[0]
+    best_score = float('inf')
     
-    # If no perfect option, use the first one (will fail validation, 
-    # but indicates a design issue we need to fix)
-    return [(competitors[i], competitors[j]) for i, j in options[0]]
+    for (a1, a2), (b1, b2) in formations:
+        score = 0
+        if a2.id in used_teammates[a1.id]:
+            score += 1
+        if b2.id in used_teammates[b1.id]:
+            score += 1
+        
+        if score < best_score:
+            best_score = score
+            best_formation = ((a1, a2), (b1, b2))
+    
+    (a1, a2), (b1, b2) = best_formation
+    return Team(a1, a2), Team(b1, b2)
+
+
+def _get_boat_position(race: Race, competitor: Competitor) -> str | None:
+    """
+    Get the boat position (column) of a competitor in a race.
+    
+    Returns one of: 'a1' (team_a pos 7), 'a2' (team_a pos 8), 
+                    'b1' (team_b pos 10), 'b2' (team_b pos 11)
+    Or None if competitor not in race.
+    """
+    if race.team_a.competitor1 == competitor:
+        return 'a1'
+    elif race.team_a.competitor2 == competitor:
+        return 'a2'
+    elif race.team_b.competitor1 == competitor:
+        return 'b1'
+    elif race.team_b.competitor2 == competitor:
+        return 'b2'
+    return None
+
+
+def _swap_within_team_a(race: Race) -> Race:
+    """Swap competitor1 and competitor2 within team_a."""
+    new_team_a = Team(race.team_a.competitor2, race.team_a.competitor1)
+    return Race(
+        race_number=race.race_number,
+        boat_set=race.boat_set,
+        team_a=new_team_a,
+        team_b=race.team_b,
+    )
+
+
+def _swap_within_team_b(race: Race) -> Race:
+    """Swap competitor1 and competitor2 within team_b."""
+    new_team_b = Team(race.team_b.competitor2, race.team_b.competitor1)
+    return Race(
+        race_number=race.race_number,
+        boat_set=race.boat_set,
+        team_a=race.team_a,
+        team_b=new_team_b,
+    )
+
+
+def _count_total_aligned(races_by_boat: dict[BoatSet, list[Race]]) -> int:
+    """Count total aligned double outings across all race pairs."""
+    total = 0
+    for boat_set in [BoatSet.A, BoatSet.B]:
+        boat_races = races_by_boat[boat_set]
+        for i in range(len(boat_races) - 1):
+            race1, race2 = boat_races[i], boat_races[i + 1]
+            c1_all = set(race1.all_competitors)
+            c2_all = set(race2.all_competitors)
+            shared = list(c1_all & c2_all)
+            if len(shared) == 2:
+                for comp in shared:
+                    if _get_boat_position(race1, comp) == _get_boat_position(race2, comp):
+                        total += 1
+    return total
+
+
+def _optimize_double_outings(races: list[Race]) -> list[Race]:
+    """
+    Opportunistically swap boat positions within teams to improve double outings.
+    
+    A proper double-outing requires staying in the SAME boat position (column)
+    across races N and N+2. This function swaps competitor1/competitor2 within
+    teams to align boat positions where possible.
+    
+    Uses multiple passes to find improvements that might only become apparent
+    after other swaps have been made.
+    """
+    # Group races by boat set
+    races_by_boat: dict[BoatSet, list[Race]] = {BoatSet.A: [], BoatSet.B: []}
+    for race in races:
+        races_by_boat[race.boat_set].append(race)
+    
+    for boat_set in [BoatSet.A, BoatSet.B]:
+        races_by_boat[boat_set] = sorted(races_by_boat[boat_set], key=lambda r: r.race_number)
+    
+    # Multiple passes to find improvements
+    for _ in range(5):  # Up to 5 passes
+        improved = False
+        
+        for boat_set in [BoatSet.A, BoatSet.B]:
+            boat_races = races_by_boat[boat_set]
+            
+            for i in range(len(boat_races) - 1):
+                race1 = races_by_boat[boat_set][i]
+                race2 = races_by_boat[boat_set][i + 1]
+                
+                # Find competitors in both races
+                c1_all = set(race1.all_competitors)
+                c2_all = set(race2.all_competitors)
+                shared = list(c1_all & c2_all)
+                
+                if len(shared) != 2:
+                    continue
+                
+                comp1, comp2 = shared[0], shared[1]
+                pos1_r1 = _get_boat_position(race1, comp1)
+                pos1_r2 = _get_boat_position(race2, comp1)
+                pos2_r1 = _get_boat_position(race1, comp2)
+                pos2_r2 = _get_boat_position(race2, comp2)
+                
+                current_aligned = (pos1_r1 == pos1_r2) + (pos2_r1 == pos2_r2)
+                
+                if current_aligned == 2:
+                    continue
+                
+                # Try all swaps in BOTH races
+                best_race1, best_race2 = race1, race2
+                best_aligned = current_aligned
+                
+                # Generate all variants of race1
+                race1_variants = [
+                    race1,
+                    _swap_within_team_a(race1),
+                    _swap_within_team_b(race1),
+                    _swap_within_team_b(_swap_within_team_a(race1)),
+                ]
+                
+                # Generate all variants of race2
+                race2_variants = [
+                    race2,
+                    _swap_within_team_a(race2),
+                    _swap_within_team_b(race2),
+                    _swap_within_team_b(_swap_within_team_a(race2)),
+                ]
+                
+                # Try all combinations
+                for r1_var in race1_variants:
+                    for r2_var in race2_variants:
+                        new_pos1_r1 = _get_boat_position(r1_var, comp1)
+                        new_pos1_r2 = _get_boat_position(r2_var, comp1)
+                        new_pos2_r1 = _get_boat_position(r1_var, comp2)
+                        new_pos2_r2 = _get_boat_position(r2_var, comp2)
+                        
+                        aligned = (new_pos1_r1 == new_pos1_r2) + (new_pos2_r1 == new_pos2_r2)
+                        if aligned > best_aligned:
+                            best_aligned = aligned
+                            best_race1 = r1_var
+                            best_race2 = r2_var
+                
+                if best_aligned > current_aligned:
+                    races_by_boat[boat_set][i] = best_race1
+                    races_by_boat[boat_set][i + 1] = best_race2
+                    improved = True
+        
+        if not improved:
+            break
+    
+    # Reconstruct races list
+    result = races_by_boat[BoatSet.A] + races_by_boat[BoatSet.B]
+    result.sort(key=lambda r: r.race_number)
+    return result

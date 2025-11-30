@@ -342,6 +342,51 @@ def check_opponent_diversity(schedule: Schedule) -> ValidationResult:
     )
 
 
+def check_max_consecutive_races(schedule: Schedule) -> ValidationResult:
+    """
+    Requirement 7: No competitor should have more than 2 consecutive races on the same boat set.
+    
+    A "triple outing" (races N, N+2, N+4) or longer is not allowed - competitors need
+    a break after a double outing.
+    """
+    errors = []
+    
+    for competitor in schedule.competitors:
+        race_numbers = schedule.get_race_numbers_for_competitor(competitor)
+        
+        # Group races by boat set (odd = A, even = B)
+        boat_a_races = sorted([r for r in race_numbers if r % 2 == 1])
+        boat_b_races = sorted([r for r in race_numbers if r % 2 == 0])
+        
+        def find_consecutive_runs(races: list[int]) -> list[list[int]]:
+            """Find runs of consecutive races (each 2 apart)."""
+            if not races:
+                return []
+            runs = []
+            current_run = [races[0]]
+            for i in range(1, len(races)):
+                if races[i] == races[i-1] + 2:
+                    current_run.append(races[i])
+                else:
+                    runs.append(current_run)
+                    current_run = [races[i]]
+            runs.append(current_run)
+            return runs
+        
+        for boat_races in [boat_a_races, boat_b_races]:
+            runs = find_consecutive_runs(boat_races)
+            for run in runs:
+                if len(run) > 2:
+                    errors.append(
+                        f"{competitor.name} has {len(run)} consecutive races: {{{', '.join(map(str, run))}}}"
+                    )
+    
+    return ValidationResult(
+        passed=len(errors) == 0,
+        message="; ".join(errors[:3]) + (f" (+{len(errors)-3} more)" if len(errors) > 3 else "")
+    )
+
+
 def validate_schedule(schedule: Schedule) -> ValidationReport:
     """
     Run all validation checks on a schedule.
@@ -360,6 +405,7 @@ def validate_schedule(schedule: Schedule) -> ValidationReport:
         "req4_5_two_race_outings": check_two_race_outings,
         "req6_schedule_balance": check_schedule_balance,
         "req6_round_structure": check_round_structure,
+        "req7_max_consecutive_races": check_max_consecutive_races,
         "opponent_diversity": check_opponent_diversity,
     }
     
