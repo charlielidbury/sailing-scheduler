@@ -96,6 +96,6 @@ class Schedule:
 
 # Constants for the current competition
 NUM_COMPETITORS = 24
-NUM_RACES = 48
-RACES_PER_COMPETITOR = 8
+NUM_RACES = 96
+RACES_PER_COMPETITOR = 16
 

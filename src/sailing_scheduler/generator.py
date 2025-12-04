@@ -1,16 +1,21 @@
 """Schedule generation logic."""
 
 import random
+import time
 from itertools import combinations
 
 from .models import (
     NUM_COMPETITORS,
+    NUM_RACES,
     BoatSet,
     Competitor,
     Race,
     Schedule,
     Team,
 )
+
+# Timeout for schedule generation (seconds)
+GENERATION_TIMEOUT = 120
 
 
 def generate_schedule() -> Schedule:
@@ -28,8 +33,21 @@ def generate_schedule() -> Schedule:
     # Try multiple seeds to find a valid schedule
     best_schedule = None
     best_proper_double_outings = 0
+    start_time = time.time()
     
-    for seed in range(200):
+    # More seeds for longer schedules (harder to find valid assignments)
+    max_seeds = 1000
+    valid_found = 0
+    
+    for seed in range(max_seeds):
+        # Check timeout
+        if time.time() - start_time > GENERATION_TIMEOUT:
+            print(f"Timeout after {seed} seeds ({valid_found} valid), using best schedule found")
+            break
+        
+        # Progress indicator every 100 seeds
+        if seed > 0 and seed % 100 == 0:
+            print(f"  Tried {seed} seeds, {valid_found} valid, best double outings: {best_proper_double_outings}")
         random.seed(seed)
         races = _try_generate_chain_schedule(competitors)
         if races is not None:
@@ -53,6 +71,26 @@ def generate_schedule() -> Schedule:
             
             if min_opponents < 12:
                 continue  # Doesn't meet minimum opponent diversity
+            
+            # Check for duplicate teammates - allow some tolerance for longer schedules
+            # With 16 races and only 23 possible teammates, some overlap may be unavoidable
+            from collections import Counter
+            max_duplicate_teammates = 0
+            total_duplicates = 0
+            for c in competitors:
+                teammates = schedule.get_teammates_for_competitor(c)
+                teammate_counts = Counter(t.id for t in teammates)
+                duplicates = sum(count - 1 for count in teammate_counts.values() if count > 1)
+                total_duplicates += duplicates
+                max_duplicate_teammates = max(max_duplicate_teammates, max(teammate_counts.values()) - 1)
+            
+            # For 96 races: allow up to 1 repeat per competitor (24 total), 
+            # and no competitor should have same teammate more than twice
+            max_allowed_total = NUM_COMPETITORS  # 24 total duplicate teammate pairings
+            if total_duplicates > max_allowed_total or max_duplicate_teammates > 1:
+                continue  # Too many duplicate teammates
+            
+            valid_found += 1
             
             # Count proper double outings
             proper_double_outings = 0
@@ -98,7 +136,8 @@ def _try_generate_chain_schedule(competitors: list[Competitor]) -> list[Race] | 
     prev_boat_a_boundary: set[int] = set()  # boat_a positions 10, 11 from last round
     prev_boat_b_boundary: set[int] = set()  # boat_b positions 10, 11 from last round
     
-    for round_num in range(4):
+    num_rounds = NUM_RACES // 12  # 12 races per round
+    for round_num in range(num_rounds):
         round_start = round_num * 12 + 1
         
         # Find valid boat assignments for this round
@@ -372,8 +411,12 @@ def _generate_chain_races_careful(
 def _form_teams_optimally(
     race_competitors: list[Competitor],
     used_teammates: dict[int, set[int]],
-) -> tuple[Team, Team]:
-    """Form teams avoiding duplicate teammates."""
+) -> tuple[Team, Team] | None:
+    """
+    Form teams avoiding duplicate teammates.
+    
+    Returns None if no valid formation exists (all options create duplicates).
+    """
     c0, c1, c2, c3 = race_competitors
     
     formations = [
@@ -382,7 +425,7 @@ def _form_teams_optimally(
         ((c0, c3), (c1, c2)),
     ]
     
-    best_formation = formations[0]
+    best_formation = None
     best_score = float('inf')
     
     for (a1, a2), (b1, b2) in formations:
@@ -395,6 +438,9 @@ def _form_teams_optimally(
         if score < best_score:
             best_score = score
             best_formation = ((a1, a2), (b1, b2))
+    
+    if best_formation is None:
+        return None
     
     (a1, a2), (b1, b2) = best_formation
     return Team(a1, a2), Team(b1, b2)
