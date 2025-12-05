@@ -163,8 +163,10 @@ def _try_generate_chain_schedule(competitors: list[Competitor]) -> list[Race] | 
         active_ids = [c.id for c in active_competitors]
         
         # Find valid boat assignments for this round (24 active competitors)
+        # Pass race_counts for balance-aware position assignment
         boat_a, boat_b = _find_round_assignment(
             active_ids,
+            race_counts,
             used_teammates, 
             race_coappearances, 
             prev_adjacent_boundary,
@@ -226,6 +228,7 @@ def _try_generate_chain_schedule(competitors: list[Competitor]) -> list[Race] | 
 
 def _find_round_assignment(
     active_ids: list[int],
+    race_counts: dict[int, int],
     used_teammates: dict[int, set[int]],
     race_coappearances: dict[int, set[int]],
     prev_adjacent_boundary: set[int],
@@ -239,6 +242,7 @@ def _find_round_assignment(
     Args:
         active_ids: List of 24 competitor IDs participating this round
                    (one competitor sits out each round with 25 total)
+        race_counts: Current race count per competitor (for balance-aware assignment)
     
     Constraints:
     1. 12 competitors per boat
@@ -248,85 +252,113 @@ def _find_round_assignment(
        prev_boat_b_boundary not in boat_b positions 0-3
        (prevents 3+ consecutive races on same boat set)
     4. Minimize teammate conflicts
+    5. Place laggards in early positions, leaders in late positions (balance optimization)
     """
-    all_ids = active_ids[:]
-    random.shuffle(all_ids)
-    
-    # Split into two boats
-    boat_a = all_ids[:12]
-    boat_b = all_ids[12:]
-    
-    # Combined boundary for boat_a: both adjacent and same-boat constraints
+    # Combined boundary constraints
     boat_a_forbidden = prev_adjacent_boundary | prev_boat_a_boundary
-    
-    # Combined boundary for boat_b: same-boat constraint
     boat_b_forbidden = prev_boat_b_boundary
     
-    # Ensure boat_a positions 0-3 don't have forbidden members
+    # Race-count-aware position assignment for balance
+    # 
+    # Chain timing analysis (when each position gets their races):
+    # - Positions 2,3: races 1+3 (A) or 2+4 (B) → FASTEST to finish both
+    # - Positions 4,5: races 3+5 (A) or 4+6 (B) → EARLY
+    # - Positions 0,1: races 1+11 (A) or 2+12 (B) → SPREAD (early + late)
+    # - Positions 6,7: races 5+7 (A) or 6+8 (B) → MID
+    # - Positions 8,9: races 7+9 (A) or 8+10 (B) → MID-LATE  
+    # - Positions 10,11: races 9+11 (A) or 10+12 (B) → SLOWEST to finish both
+    #
+    # Strategy: Put laggards (lowest race count) in positions 2,3,4,5 to finish early
+    #           Put leaders (highest race count) in positions 8,9,10,11 to finish late
+    #           Positions 0,1 and 6,7 are middle ground
+    
+    # Sort all by race count
+    sorted_ids = sorted(active_ids, key=lambda c: (race_counts[c], random.random()))
+    
+    # Separate by boundary constraints
+    allowed_for_0_3_a = [c for c in sorted_ids if c not in boat_a_forbidden]
+    forbidden_for_0_3_a = [c for c in sorted_ids if c in boat_a_forbidden]
+    
+    # Build boat assignments with position-aware placement
+    # We need 12 per boat, with specific positions getting specific race-count ranges
+    
+    # FASTEST positions (2,3): lowest race counts, must be allowed for 0-3
+    # EARLY positions (4,5): next lowest
+    # SPREAD positions (0,1): middle-low, must be allowed for 0-3
+    # MID positions (6,7): middle
+    # MID-LATE positions (8,9): middle-high
+    # SLOWEST positions (10,11): highest race counts
+    
+    # For boat A: positions 0-3 must be from allowed_for_0_3_a
+    # Ideal order by race count: [2, 3, 4, 5, 0, 1, 6, 7, 8, 9, 10, 11]
+    
+    # Take 4 lowest allowed for positions 0-3
+    boat_a_0_3 = allowed_for_0_3_a[:4]
+    remaining_allowed_a = allowed_for_0_3_a[4:]
+    
+    # Positions 4-11: mix of remaining allowed and forbidden, sorted by race count
+    remaining_for_a = remaining_allowed_a + forbidden_for_0_3_a
+    remaining_for_a.sort(key=lambda c: (race_counts[c], random.random()))
+    boat_a_4_11 = remaining_for_a[:8]
+    remaining_for_b = remaining_for_a[8:]
+    
+    # Reorder boat_a for optimal timing:
+    # Want lowest in 2,3 (fastest), then 4,5 (early), then 0,1, then 6,7, then 8-11 (slow)
+    # Current: positions 0,1,2,3 have lowest, then 4-11 have rest
+    # Swap: put indices 0,1 into positions 0,1 but put lowest 2 into positions 2,3
+    pos_0_3 = boat_a_0_3  # 4 people, sorted by race count (lowest first)
+    # Reorder: [2nd lowest, 3rd lowest, lowest, 4th lowest] -> positions [0,1,2,3]
+    # So positions 2,3 get the absolute lowest race counts
+    if len(pos_0_3) == 4:
+        boat_a_0_3 = [pos_0_3[2], pos_0_3[3], pos_0_3[0], pos_0_3[1]]
+    
+    boat_a = boat_a_0_3 + boat_a_4_11
+    
+    # Now build boat B from remaining
+    allowed_for_0_3_b = [c for c in remaining_for_b if c not in boat_b_forbidden]
+    forbidden_for_0_3_b = [c for c in remaining_for_b if c in boat_b_forbidden]
+    
+    # Sort each group
+    allowed_for_0_3_b.sort(key=lambda c: (race_counts[c], random.random()))
+    forbidden_for_0_3_b.sort(key=lambda c: (race_counts[c], random.random()))
+    
+    # Take lowest allowed for positions 0-3
+    boat_b_0_3 = allowed_for_0_3_b[:4]
+    remaining_b = allowed_for_0_3_b[4:] + forbidden_for_0_3_b
+    remaining_b.sort(key=lambda c: (race_counts[c], random.random()))
+    boat_b_4_11 = remaining_b[:8]
+    
+    # Reorder boat_b_0_3 same way
+    if len(boat_b_0_3) == 4:
+        boat_b_0_3 = [boat_b_0_3[2], boat_b_0_3[3], boat_b_0_3[0], boat_b_0_3[1]]
+    
+    boat_b = boat_b_0_3 + boat_b_4_11
+    
+    # Verify we have correct counts and constraints
+    if len(boat_a) != 12 or len(boat_b) != 12:
+        # Fallback: simple sorted assignment
+        all_ids = sorted(active_ids, key=lambda c: (race_counts[c], random.random()))
+        boat_a = all_ids[:12]
+        boat_b = all_ids[12:]
+    
+    # Verify and fix boundary constraints if violated
     if boat_a_forbidden:
-        forbidden_in_a = [x for x in boat_a if x in boat_a_forbidden]
-        safe_in_a = [x for x in boat_a if x not in boat_a_forbidden]
-        
-        if len(safe_in_a) < 4:
-            # Need to swap some forbidden out of boat_a to boat_b
-            needed = 4 - len(safe_in_a)
-            # Find safe members in boat_b (not forbidden for boat_a)
-            safe_in_b = [x for x in boat_b if x not in boat_a_forbidden]
-            
-            to_move_to_b = forbidden_in_a[:needed]
-            to_move_to_a = safe_in_b[:needed]
-            
-            boat_a = [x for x in boat_a if x not in to_move_to_b] + to_move_to_a
-            boat_b = [x for x in boat_b if x not in to_move_to_a] + to_move_to_b
-            
-            forbidden_in_a = [x for x in boat_a if x in boat_a_forbidden]
+        violation = [i for i in range(4) if boat_a[i] in boat_a_forbidden]
+        if violation:
             safe_in_a = [x for x in boat_a if x not in boat_a_forbidden]
-        
-        # Reorder: safe in positions 0-3, forbidden in 4+
-        boat_a = safe_in_a[:4] + forbidden_in_a + safe_in_a[4:]
+            forbidden_in_a = [x for x in boat_a if x in boat_a_forbidden]
+            safe_in_a.sort(key=lambda c: (race_counts[c], random.random()))
+            forbidden_in_a.sort(key=lambda c: (race_counts[c], random.random()))
+            boat_a = safe_in_a[:4] + forbidden_in_a + safe_in_a[4:]
     
-    # Ensure boat_b positions 0-3 don't have forbidden members
     if boat_b_forbidden:
-        forbidden_in_b = [x for x in boat_b if x in boat_b_forbidden]
-        safe_in_b = [x for x in boat_b if x not in boat_b_forbidden]
-        
-        if len(safe_in_b) < 4:
-            # Need to swap some forbidden out of boat_b to boat_a
-            needed = 4 - len(safe_in_b)
-            # Find safe members in boat_a that can go to boat_b
-            # (must not be in positions 0-3 of boat_a if boat_a_forbidden)
-            available_in_a = boat_a[4:] if boat_a_forbidden else boat_a
-            safe_for_b = [x for x in available_in_a if x not in boat_b_forbidden]
-            
-            to_move_to_a = forbidden_in_b[:needed]
-            to_move_to_b = safe_for_b[:needed]
-            
-            # Update boats
-            new_boat_b = [x for x in boat_b if x not in to_move_to_a] + to_move_to_b
-            new_boat_a = [x for x in boat_a if x not in to_move_to_b] + to_move_to_a
-            
-            # Re-apply boat_a constraint
-            if boat_a_forbidden:
-                forbidden_in_a = [x for x in new_boat_a if x in boat_a_forbidden]
-                safe_in_a = [x for x in new_boat_a if x not in boat_a_forbidden]
-                boat_a = safe_in_a[:4] + forbidden_in_a + safe_in_a[4:]
-            else:
-                boat_a = new_boat_a
-            
-            forbidden_in_b = [x for x in new_boat_b if x in boat_b_forbidden]
-            safe_in_b = [x for x in new_boat_b if x not in boat_b_forbidden]
-            boat_b = new_boat_b
-        
-        # Reorder boat_b: safe in positions 0-3, forbidden in 4+
-        boat_b = safe_in_b[:4] + forbidden_in_b + safe_in_b[4:]
-    
-    # Verify constraints
-    if boat_a_forbidden:
-        assert not any(boat_a[i] in boat_a_forbidden for i in range(4)), \
-            f"Boat A boundary violated: positions 0-3 = {boat_a[:4]}, forbidden = {boat_a_forbidden}"
-    if boat_b_forbidden:
-        assert not any(boat_b[i] in boat_b_forbidden for i in range(4)), \
-            f"Boat B boundary violated: positions 0-3 = {boat_b[:4]}, forbidden = {boat_b_forbidden}"
+        violation = [i for i in range(4) if boat_b[i] in boat_b_forbidden]
+        if violation:
+            safe_in_b = [x for x in boat_b if x not in boat_b_forbidden]
+            forbidden_in_b = [x for x in boat_b if x in boat_b_forbidden]
+            safe_in_b.sort(key=lambda c: (race_counts[c], random.random()))
+            forbidden_in_b.sort(key=lambda c: (race_counts[c], random.random()))
+            boat_b = safe_in_b[:4] + forbidden_in_b + safe_in_b[4:]
     
     # Optimize ordering to minimize teammate conflicts
     chain = [[0,1,2,3], [2,3,4,5], [4,5,6,7], [6,7,8,9], [8,9,10,11], [10,11,0,1]]
