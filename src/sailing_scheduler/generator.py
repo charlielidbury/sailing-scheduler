@@ -5,6 +5,7 @@ import time
 from itertools import combinations
 
 from .models import (
+    COMPETITORS_PER_ROUND,
     NUM_COMPETITORS,
     NUM_RACES,
     BoatSet,
@@ -16,6 +17,19 @@ from .models import (
 
 # Timeout for schedule generation (seconds)
 GENERATION_TIMEOUT = 120
+
+
+def _select_sit_out(
+    competitors: list[Competitor], 
+    race_counts: dict[int, int]
+) -> Competitor:
+    """
+    Select the competitor with the most races to sit out.
+    
+    This maintains interruptibility by ensuring the spread between
+    min and max races is at most 2 at any point in the schedule.
+    """
+    return max(competitors, key=lambda c: race_counts[c.id])
 
 
 def generate_schedule() -> Schedule:
@@ -123,6 +137,9 @@ def _try_generate_chain_schedule(competitors: list[Competitor]) -> list[Race] | 
     races: list[Race] = []
     used_teammates: dict[int, set[int]] = {c.id: set() for c in competitors}
     
+    # Track race counts for sit-out selection (25 competitors, 24 race per round)
+    race_counts: dict[int, int] = {c.id: 0 for c in competitors}
+    
     # Track which competitor pairs have been in the same race (could become teammates)
     race_coappearances: dict[int, set[int]] = {c.id: set() for c in competitors}
     
@@ -140,8 +157,14 @@ def _try_generate_chain_schedule(competitors: list[Competitor]) -> list[Race] | 
     for round_num in range(num_rounds):
         round_start = round_num * 12 + 1
         
-        # Find valid boat assignments for this round
+        # Select sit-out competitor (most races sits out for interruptibility)
+        sit_out = _select_sit_out(competitors, race_counts)
+        active_competitors = [c for c in competitors if c != sit_out]
+        active_ids = [c.id for c in active_competitors]
+        
+        # Find valid boat assignments for this round (24 active competitors)
         boat_a, boat_b = _find_round_assignment(
+            active_ids,
             used_teammates, 
             race_coappearances, 
             prev_adjacent_boundary,
@@ -153,8 +176,10 @@ def _try_generate_chain_schedule(competitors: list[Competitor]) -> list[Race] | 
         if boat_a is None:
             return None
         
-        boat_a_comps = [competitors[i] for i in boat_a]
-        boat_b_comps = [competitors[i] for i in boat_b]
+        # Map IDs back to Competitor objects
+        id_to_comp = {c.id: c for c in competitors}
+        boat_a_comps = [id_to_comp[i] for i in boat_a]
+        boat_b_comps = [id_to_comp[i] for i in boat_b]
         
         boat_a_nums = [round_start + i * 2 for i in range(6)]
         boat_b_nums = [round_start + 1 + i * 2 for i in range(6)]
@@ -182,6 +207,10 @@ def _try_generate_chain_schedule(competitors: list[Competitor]) -> list[Race] | 
         races.extend(boat_a_races)
         races.extend(boat_b_races)
         
+        # Update race counts for active competitors (each races twice per round)
+        for comp_id in boat_a + boat_b:
+            race_counts[comp_id] += 2
+        
         # Update boundaries for next round
         # Adjacent race boundary: boat_b last race positions -> boat_a first race
         prev_adjacent_boundary = {boat_b[0], boat_b[1], boat_b[10], boat_b[11]}
@@ -196,6 +225,7 @@ def _try_generate_chain_schedule(competitors: list[Competitor]) -> list[Race] | 
 
 
 def _find_round_assignment(
+    active_ids: list[int],
     used_teammates: dict[int, set[int]],
     race_coappearances: dict[int, set[int]],
     prev_adjacent_boundary: set[int],
@@ -206,6 +236,10 @@ def _find_round_assignment(
     """
     Find valid boat assignments for a round.
     
+    Args:
+        active_ids: List of 24 competitor IDs participating this round
+                   (one competitor sits out each round with 25 total)
+    
     Constraints:
     1. 12 competitors per boat
     2. Adjacent race boundary: prev_adjacent_boundary members not in boat_a positions 0-3
@@ -215,7 +249,7 @@ def _find_round_assignment(
        (prevents 3+ consecutive races on same boat set)
     4. Minimize teammate conflicts
     """
-    all_ids = list(range(24))
+    all_ids = active_ids[:]
     random.shuffle(all_ids)
     
     # Split into two boats

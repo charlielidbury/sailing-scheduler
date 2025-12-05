@@ -10,6 +10,7 @@ from collections import Counter
 from dataclasses import dataclass
 
 from .models import (
+    MIN_RACES_PER_COMPETITOR,
     NUM_COMPETITORS,
     NUM_RACES,
     RACES_PER_COMPETITOR,
@@ -132,15 +133,31 @@ def check_no_adjacent_races(schedule: Schedule) -> ValidationResult:
     )
 
 
-def check_exactly_eight_races(schedule: Schedule) -> ValidationResult:
+def check_races_per_competitor(schedule: Schedule) -> ValidationResult:
     """
-    Requirement 2: Each competitor partakes in exactly 8 races.
+    Requirement 2: Each competitor partakes in the expected number of races.
+    
+    With 25 competitors and sit-out rotation, competitors race 14-16 times
+    (those who sit out once get 14, others get 16).
     """
     errors = []
+    race_counts = []
+    
     for competitor in schedule.competitors:
         race_count = len(schedule.get_races_for_competitor(competitor))
-        if race_count != RACES_PER_COMPETITOR:
-            errors.append(f"{competitor.name} has {race_count} races")
+        race_counts.append(race_count)
+        
+        if race_count < MIN_RACES_PER_COMPETITOR or race_count > RACES_PER_COMPETITOR:
+            errors.append(
+                f"{competitor.name} has {race_count} races "
+                f"(expected {MIN_RACES_PER_COMPETITOR}-{RACES_PER_COMPETITOR})"
+            )
+    
+    # Also check that spread is at most 2
+    if race_counts:
+        spread = max(race_counts) - min(race_counts)
+        if spread > 2:
+            errors.append(f"Race count spread is {spread} (max allowed: 2)")
     
     return ValidationResult(
         passed=len(errors) == 0,
@@ -252,11 +269,12 @@ def check_schedule_balance(schedule: Schedule) -> ValidationResult:
     Requirement 6: The schedule must be interruptible.
     
     At regular intervals, all competitors should have raced similar amounts.
+    With sit-out rotation (most races sits out), spread should be at most 2.
     """
     # Check at every round boundary (12 races per round)
     checkpoints = list(range(12, NUM_RACES + 1, 12))
     errors = []
-    max_acceptable_spread = 4
+    max_acceptable_spread = 2  # Guaranteed by "most races sits out" strategy
     
     for checkpoint in checkpoints:
         if checkpoint > len(schedule.races):
@@ -291,7 +309,9 @@ def check_round_structure(schedule: Schedule) -> ValidationResult:
     """
     Requirement 6: Schedule should have round structure.
     
-    Each competitor should race exactly twice per round (12 races per round).
+    With 25 competitors and sit-out rotation:
+    - 24 competitors race exactly twice per round
+    - 1 competitor sits out (0 races) per round
     """
     races_per_round = 12
     num_rounds = NUM_RACES // races_per_round
@@ -312,13 +332,34 @@ def check_round_structure(schedule: Schedule) -> ValidationResult:
             for competitor in race.all_competitors:
                 race_counts[competitor.id] += 1
         
-        # Each competitor should race exactly twice per round
+        # Count how many have 0, 2, or other race counts
+        count_distribution = {0: 0, 2: 0}
+        invalid_counts = []
+        
         for competitor in schedule.competitors:
             count = race_counts[competitor.id]
-            if count != 2:
-                errors.append(
-                    f"Round {round_num + 1}: {competitor.name} has {count} races (expected 2)"
-                )
+            if count in count_distribution:
+                count_distribution[count] += 1
+            else:
+                invalid_counts.append((competitor.name, count))
+        
+        # With 25 competitors: expect 1 sit-out (0 races), 24 racing (2 races each)
+        expected_sit_outs = NUM_COMPETITORS - 24  # 1 for 25 competitors
+        
+        if count_distribution[0] != expected_sit_outs:
+            errors.append(
+                f"Round {round_num + 1}: {count_distribution[0]} sit-outs (expected {expected_sit_outs})"
+            )
+        
+        if count_distribution[2] != 24:
+            errors.append(
+                f"Round {round_num + 1}: {count_distribution[2]} racing twice (expected 24)"
+            )
+        
+        for name, count in invalid_counts:
+            errors.append(
+                f"Round {round_num + 1}: {name} has {count} races (expected 0 or 2)"
+            )
     
     return ValidationResult(
         passed=len(errors) == 0,
@@ -415,7 +456,7 @@ def validate_schedule(schedule: Schedule) -> ValidationReport:
         "race_numbers_sequential": check_race_numbers_sequential,
         "each_race_has_four_competitors": check_each_race_has_four_unique_competitors,
         "req1_no_adjacent_races": check_no_adjacent_races,
-        "req2_exactly_eight_races": check_exactly_eight_races,
+        "req2_races_per_competitor": check_races_per_competitor,
         "req3_unique_teammates": check_unique_teammates,
         "req4_5_two_race_outings": check_two_race_outings,
         "req6_schedule_balance": check_schedule_balance,

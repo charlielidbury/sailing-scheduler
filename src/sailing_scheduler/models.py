@@ -95,7 +95,9 @@ class Schedule:
 
 
 # Constants for the current competition
-NUM_COMPETITORS = 24
+NUM_COMPETITORS = 25
 NUM_RACES = 96
-RACES_PER_COMPETITOR = 16
+RACES_PER_COMPETITOR = 16  # Target for those who never sit out
+MIN_RACES_PER_COMPETITOR = 14  # For those who sit out once
+COMPETITORS_PER_ROUND = 24  # Chain structure needs exactly 24
 

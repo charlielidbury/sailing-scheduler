@@ -19,19 +19,32 @@ def schedule_to_tsv(schedule: Schedule) -> str:
     Format:
     - Cambridge Pink and Black Stripe (Boat Set A)
     - RHS Green Circle/Black Diamond (Boat Set B)
+    - Min/Max columns showing race count balance at each point
     
     Each race fills in the appropriate columns based on which boat set is used.
     """
     lines: list[str] = []
     
     # Header row 1: Boat set names (spanning columns)
-    lines.append("\tCambridge Pink and Black Stripe\t\t\t\tRHS Green Circle/Black Diamond\t\t\t")
+    lines.append("\tCambridge Pink and Black Stripe\t\t\t\tRHS Green Circle/Black Diamond\t\t\t\tBalance")
     
     # Header row 2: Boat names with positions
-    lines.append("Race\tPink(7, 8)\t\tBlack Stripe(10, 11)\t\tGreen Circle(7, 8)\t\tBlack Diamond(10, 11)\t")
+    lines.append("Race\tPink(7, 8)\t\tBlack Stripe(10, 11)\t\tGreen Circle(7, 8)\t\tBlack Diamond(10, 11)\t\tMin\tMax")
+    
+    # Track cumulative race counts for balance columns
+    race_counts: dict[int, int] = {c.id: 0 for c in schedule.competitors}
     
     # Race rows
     for race in schedule.races:
+        # Update race counts for competitors in this race
+        for competitor in race.all_competitors:
+            race_counts[competitor.id] += 1
+        
+        # Calculate min/max at this point
+        counts = list(race_counts.values())
+        min_races = min(counts)
+        max_races = max(counts)
+        
         # Get competitor names (without prefix)
         team_a_c1 = _short_name(race.team_a.competitor1.name)
         team_a_c2 = _short_name(race.team_a.competitor2.name)
@@ -41,11 +54,11 @@ def schedule_to_tsv(schedule: Schedule) -> str:
         if race.boat_set == BoatSet.A:
             # Cambridge boats (Pink and Black Stripe)
             # Team A in Pink, Team B in Black Stripe
-            row = f"{race.race_number}\t{team_a_c1}\t{team_a_c2}\t{team_b_c1}\t{team_b_c2}\t\t\t\t"
+            row = f"{race.race_number}\t{team_a_c1}\t{team_a_c2}\t{team_b_c1}\t{team_b_c2}\t\t\t\t\t{min_races}\t{max_races}"
         else:
             # RHS boats (Green Circle and Black Diamond)
             # Team A in Green Circle, Team B in Black Diamond
-            row = f"{race.race_number}\t\t\t\t\t{team_a_c1}\t{team_a_c2}\t{team_b_c1}\t{team_b_c2}"
+            row = f"{race.race_number}\t\t\t\t\t{team_a_c1}\t{team_a_c2}\t{team_b_c1}\t{team_b_c2}\t{min_races}\t{max_races}"
         
         lines.append(row)
     
