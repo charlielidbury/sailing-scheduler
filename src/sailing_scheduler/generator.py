@@ -157,9 +157,13 @@ def _try_generate_chain_schedule(competitors: list[Competitor]) -> list[Race] | 
     for round_num in range(num_rounds):
         round_start = round_num * 12 + 1
         
-        # Select sit-out competitor (most races sits out for interruptibility)
-        sit_out = _select_sit_out(competitors, race_counts)
-        active_competitors = [c for c in competitors if c != sit_out]
+        # Select sit-out competitor if we have more than 24 competitors
+        if NUM_COMPETITORS > COMPETITORS_PER_ROUND:
+            sit_out = _select_sit_out(competitors, race_counts)
+            active_competitors = [c for c in competitors if c != sit_out]
+        else:
+            # All competitors race (no sit-out)
+            active_competitors = competitors
         active_ids = [c.id for c in active_competitors]
         
         # Find valid boat assignments for this round (24 active competitors)
