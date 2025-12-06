@@ -99,7 +99,7 @@ def generate_schedule() -> Schedule:
                 continue  # Doesn't meet minimum opponent diversity
             
             # Check for duplicate teammates - allow some tolerance for longer schedules
-            # With 16 races and only 23 possible teammates, some overlap may be unavoidable
+            # With more races per competitor, some overlap is unavoidable
             from collections import Counter
             max_duplicate_teammates = 0
             total_duplicates = 0
@@ -110,10 +110,10 @@ def generate_schedule() -> Schedule:
                 total_duplicates += duplicates
                 max_duplicate_teammates = max(max_duplicate_teammates, max(teammate_counts.values()) - 1)
             
-            # For 96 races: allow up to 1 repeat per competitor (24 total), 
-            # and no competitor should have same teammate more than twice
-            max_allowed_total = NUM_COMPETITORS  # 24 total duplicate teammate pairings
-            if total_duplicates > max_allowed_total or max_duplicate_teammates > 1:
+            # Allow ~2-3 duplicate teammate pairings per competitor on average
+            # and max same teammate 3 times (max_duplicate_teammates <= 2)
+            max_allowed_total = NUM_COMPETITORS * 3
+            if total_duplicates > max_allowed_total or max_duplicate_teammates > 2:
                 continue  # Too many duplicate teammates
             
             valid_found += 1
