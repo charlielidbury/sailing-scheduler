@@ -8,6 +8,7 @@ from .models import (
     COMPETITORS_PER_ROUND,
     NUM_COMPETITORS,
     NUM_RACES,
+    POSITIONS_PER_BOAT,
     BoatSet,
     Competitor,
     Race,
@@ -19,17 +20,28 @@ from .models import (
 GENERATION_TIMEOUT = 120
 
 
-def _select_sit_out(
+def _select_sit_outs(
     competitors: list[Competitor], 
-    race_counts: dict[int, int]
-) -> Competitor:
+    race_counts: dict[int, int],
+    num_sit_outs: int
+) -> list[Competitor]:
     """
-    Select the competitor with the most races to sit out.
+    Select the competitors with the most races to sit out.
     
     This maintains interruptibility by ensuring the spread between
     min and max races is at most 2 at any point in the schedule.
+    
+    Args:
+        competitors: All competitors
+        race_counts: Current race count per competitor
+        num_sit_outs: How many competitors need to sit out this round
+    
+    Returns:
+        List of competitors who will sit out (those with most races)
     """
-    return max(competitors, key=lambda c: race_counts[c.id])
+    # Sort by race count descending (most races first), then by id for determinism
+    sorted_comps = sorted(competitors, key=lambda c: (-race_counts[c.id], c.id))
+    return sorted_comps[:num_sit_outs]
 
 
 def generate_schedule() -> Schedule:
@@ -137,7 +149,7 @@ def _try_generate_chain_schedule(competitors: list[Competitor]) -> list[Race] | 
     races: list[Race] = []
     used_teammates: dict[int, set[int]] = {c.id: set() for c in competitors}
     
-    # Track race counts for sit-out selection (25 competitors, 24 race per round)
+    # Track race counts for sit-out selection
     race_counts: dict[int, int] = {c.id: 0 for c in competitors}
     
     # Track which competitor pairs have been in the same race (could become teammates)
@@ -147,26 +159,40 @@ def _try_generate_chain_schedule(competitors: list[Competitor]) -> list[Race] | 
     prev_adjacent_boundary: set[int] = set()
     
     # Boundary constraints for consecutive races on SAME boat set
-    # Positions 10, 11 race in the last two chain races of a round
-    # Positions 0-3 race in the first chain race of a round
-    # To prevent 3+ consecutive races, pos 10,11 in round N must not be pos 0-3 in round N+1
-    prev_boat_a_boundary: set[int] = set()  # boat_a positions 10, 11 from last round
-    prev_boat_b_boundary: set[int] = set()  # boat_b positions 10, 11 from last round
+    # For 10-position chain: positions [8,9,0,1] race in the last chain group
+    # Positions 0-3 race in the first chain group
+    # To prevent 3+ consecutive races, pos 8,9,0,1 in round N must not be pos 0-3 in round N+1
+    prev_boat_a_boundary: set[int] = set()  # boat_a positions 8, 9, 0, 1 from last round
+    prev_boat_b_boundary: set[int] = set()  # boat_b positions 8, 9, 0, 1 from last round
     
-    num_rounds = NUM_RACES // 12  # 12 races per round
+    # Chain structure for 10 positions per boat (5 groups)
+    chain = [
+        [0, 1, 2, 3],
+        [2, 3, 4, 5],
+        [4, 5, 6, 7],
+        [6, 7, 8, 9],
+        [8, 9, 0, 1],
+    ]
+    races_per_round = len(chain) * 2  # 5 races per boat × 2 boats = 10
+    
+    num_rounds = NUM_RACES // races_per_round
     for round_num in range(num_rounds):
-        round_start = round_num * 12 + 1
+        round_start = round_num * races_per_round + 1
         
-        # Select sit-out competitor if we have more than 24 competitors
-        if NUM_COMPETITORS > COMPETITORS_PER_ROUND:
-            sit_out = _select_sit_out(competitors, race_counts)
-            active_competitors = [c for c in competitors if c != sit_out]
+        # Calculate how many sit-outs needed
+        num_sit_outs = NUM_COMPETITORS - COMPETITORS_PER_ROUND
+        
+        # Select sit-out competitors if we have more than COMPETITORS_PER_ROUND
+        if num_sit_outs > 0:
+            sit_outs = _select_sit_outs(competitors, race_counts, num_sit_outs)
+            sit_out_ids = {c.id for c in sit_outs}
+            active_competitors = [c for c in competitors if c.id not in sit_out_ids]
         else:
             # All competitors race (no sit-out)
             active_competitors = competitors
         active_ids = [c.id for c in active_competitors]
         
-        # Find valid boat assignments for this round (24 active competitors)
+        # Find valid boat assignments for this round (COMPETITORS_PER_ROUND active competitors)
         # Pass race_counts for balance-aware position assignment
         boat_a, boat_b = _find_round_assignment(
             active_ids,
@@ -187,22 +213,23 @@ def _try_generate_chain_schedule(competitors: list[Competitor]) -> list[Race] | 
         boat_a_comps = [id_to_comp[i] for i in boat_a]
         boat_b_comps = [id_to_comp[i] for i in boat_b]
         
-        boat_a_nums = [round_start + i * 2 for i in range(6)]
-        boat_b_nums = [round_start + 1 + i * 2 for i in range(6)]
+        # Race numbers: Boat A gets odd races (1,3,5,7,9), Boat B gets even races (2,4,6,8,10)
+        num_races_per_boat = len(chain)
+        boat_a_nums = [round_start + i * 2 for i in range(num_races_per_boat)]
+        boat_b_nums = [round_start + 1 + i * 2 for i in range(num_races_per_boat)]
         
         # Generate races and track teammate usage
         boat_a_races = _generate_chain_races_careful(
-            BoatSet.A, boat_a_nums, boat_a_comps, used_teammates
+            BoatSet.A, boat_a_nums, boat_a_comps, used_teammates, chain
         )
         boat_b_races = _generate_chain_races_careful(
-            BoatSet.B, boat_b_nums, boat_b_comps, used_teammates
+            BoatSet.B, boat_b_nums, boat_b_comps, used_teammates, chain
         )
         
         if boat_a_races is None or boat_b_races is None:
             return None
         
         # Update co-appearance tracking
-        chain = [[0,1,2,3], [2,3,4,5], [4,5,6,7], [6,7,8,9], [8,9,10,11], [10,11,0,1]]
         for group in chain:
             for i in group:
                 for j in group:
@@ -218,13 +245,14 @@ def _try_generate_chain_schedule(competitors: list[Competitor]) -> list[Race] | 
             race_counts[comp_id] += 2
         
         # Update boundaries for next round
-        # Adjacent race boundary: boat_b last race positions -> boat_a first race
-        prev_adjacent_boundary = {boat_b[0], boat_b[1], boat_b[10], boat_b[11]}
+        # Adjacent race boundary: boat_b last race positions [8,9,0,1] -> boat_a first race [0,1,2,3]
+        # Shared positions are 0,1, so competitors in boat_b pos 0,1 cannot be in boat_a pos 0-3
+        prev_adjacent_boundary = {boat_b[0], boat_b[1], boat_b[8], boat_b[9]}
         
-        # Same-boat consecutive boundary: ALL positions in last chain race [10, 11, 0, 1]
+        # Same-boat consecutive boundary: ALL positions in last chain race [8, 9, 0, 1]
         # These must not be at positions 0-3 (first chain race) of next round
-        prev_boat_a_boundary = {boat_a[0], boat_a[1], boat_a[10], boat_a[11]}
-        prev_boat_b_boundary = {boat_b[0], boat_b[1], boat_b[10], boat_b[11]}
+        prev_boat_a_boundary = {boat_a[0], boat_a[1], boat_a[8], boat_a[9]}
+        prev_boat_b_boundary = {boat_b[0], boat_b[1], boat_b[8], boat_b[9]}
     
     races.sort(key=lambda r: r.race_number)
     return races
@@ -244,12 +272,11 @@ def _find_round_assignment(
     Find valid boat assignments for a round.
     
     Args:
-        active_ids: List of 24 competitor IDs participating this round
-                   (one competitor sits out each round with 25 total)
+        active_ids: List of POSITIONS_PER_BOAT * 2 competitor IDs participating this round
         race_counts: Current race count per competitor (for balance-aware assignment)
     
     Constraints:
-    1. 12 competitors per boat
+    1. POSITIONS_PER_BOAT competitors per boat (10 for 23-competitor schedule)
     2. Adjacent race boundary: prev_adjacent_boundary members not in boat_a positions 0-3
        (prevents racing in races N and N+1 which overlap)
     3. Same-boat consecutive boundary: prev_boat_a_boundary not in boat_a positions 0-3,
@@ -258,23 +285,18 @@ def _find_round_assignment(
     4. Minimize teammate conflicts
     5. Place laggards in early positions, leaders in late positions (balance optimization)
     """
+    positions_per_boat = POSITIONS_PER_BOAT  # 10 for 23-competitor schedule
+    
     # Combined boundary constraints
     boat_a_forbidden = prev_adjacent_boundary | prev_boat_a_boundary
     boat_b_forbidden = prev_boat_b_boundary
     
-    # Race-count-aware position assignment for balance
-    # 
-    # Chain timing analysis (when each position gets their races):
+    # 10-position chain structure:
     # - Positions 2,3: races 1+3 (A) or 2+4 (B) → FASTEST to finish both
     # - Positions 4,5: races 3+5 (A) or 4+6 (B) → EARLY
-    # - Positions 0,1: races 1+11 (A) or 2+12 (B) → SPREAD (early + late)
+    # - Positions 0,1: races 1+9 (A) or 2+10 (B) → SPREAD (early + late)
     # - Positions 6,7: races 5+7 (A) or 6+8 (B) → MID
-    # - Positions 8,9: races 7+9 (A) or 8+10 (B) → MID-LATE  
-    # - Positions 10,11: races 9+11 (A) or 10+12 (B) → SLOWEST to finish both
-    #
-    # Strategy: Put laggards (lowest race count) in positions 2,3,4,5 to finish early
-    #           Put leaders (highest race count) in positions 8,9,10,11 to finish late
-    #           Positions 0,1 and 6,7 are middle ground
+    # - Positions 8,9: races 7+9 (A) or 8+10 (B) → SLOWEST to finish both
     
     # Sort all by race count
     sorted_ids = sorted(active_ids, key=lambda c: (race_counts[c], random.random()))
@@ -284,39 +306,27 @@ def _find_round_assignment(
     forbidden_for_0_3_a = [c for c in sorted_ids if c in boat_a_forbidden]
     
     # Build boat assignments with position-aware placement
-    # We need 12 per boat, with specific positions getting specific race-count ranges
-    
-    # FASTEST positions (2,3): lowest race counts, must be allowed for 0-3
-    # EARLY positions (4,5): next lowest
-    # SPREAD positions (0,1): middle-low, must be allowed for 0-3
-    # MID positions (6,7): middle
-    # MID-LATE positions (8,9): middle-high
-    # SLOWEST positions (10,11): highest race counts
+    # We need positions_per_boat per boat
     
     # For boat A: positions 0-3 must be from allowed_for_0_3_a
-    # Ideal order by race count: [2, 3, 4, 5, 0, 1, 6, 7, 8, 9, 10, 11]
-    
     # Take 4 lowest allowed for positions 0-3
     boat_a_0_3 = allowed_for_0_3_a[:4]
     remaining_allowed_a = allowed_for_0_3_a[4:]
     
-    # Positions 4-11: mix of remaining allowed and forbidden, sorted by race count
+    # Positions 4-(positions_per_boat-1): mix of remaining allowed and forbidden
+    positions_4_plus = positions_per_boat - 4  # 6 for 10-position chain
     remaining_for_a = remaining_allowed_a + forbidden_for_0_3_a
     remaining_for_a.sort(key=lambda c: (race_counts[c], random.random()))
-    boat_a_4_11 = remaining_for_a[:8]
-    remaining_for_b = remaining_for_a[8:]
+    boat_a_4_plus = remaining_for_a[:positions_4_plus]
+    remaining_for_b = remaining_for_a[positions_4_plus:]
     
-    # Reorder boat_a for optimal timing:
-    # Want lowest in 2,3 (fastest), then 4,5 (early), then 0,1, then 6,7, then 8-11 (slow)
-    # Current: positions 0,1,2,3 have lowest, then 4-11 have rest
-    # Swap: put indices 0,1 into positions 0,1 but put lowest 2 into positions 2,3
+    # Reorder boat_a_0_3 for optimal timing:
+    # Want lowest in 2,3 (fastest), so reorder
     pos_0_3 = boat_a_0_3  # 4 people, sorted by race count (lowest first)
-    # Reorder: [2nd lowest, 3rd lowest, lowest, 4th lowest] -> positions [0,1,2,3]
-    # So positions 2,3 get the absolute lowest race counts
     if len(pos_0_3) == 4:
         boat_a_0_3 = [pos_0_3[2], pos_0_3[3], pos_0_3[0], pos_0_3[1]]
     
-    boat_a = boat_a_0_3 + boat_a_4_11
+    boat_a = boat_a_0_3 + boat_a_4_plus
     
     # Now build boat B from remaining
     allowed_for_0_3_b = [c for c in remaining_for_b if c not in boat_b_forbidden]
@@ -330,20 +340,20 @@ def _find_round_assignment(
     boat_b_0_3 = allowed_for_0_3_b[:4]
     remaining_b = allowed_for_0_3_b[4:] + forbidden_for_0_3_b
     remaining_b.sort(key=lambda c: (race_counts[c], random.random()))
-    boat_b_4_11 = remaining_b[:8]
+    boat_b_4_plus = remaining_b[:positions_4_plus]
     
     # Reorder boat_b_0_3 same way
     if len(boat_b_0_3) == 4:
         boat_b_0_3 = [boat_b_0_3[2], boat_b_0_3[3], boat_b_0_3[0], boat_b_0_3[1]]
     
-    boat_b = boat_b_0_3 + boat_b_4_11
+    boat_b = boat_b_0_3 + boat_b_4_plus
     
     # Verify we have correct counts and constraints
-    if len(boat_a) != 12 or len(boat_b) != 12:
+    if len(boat_a) != positions_per_boat or len(boat_b) != positions_per_boat:
         # Fallback: simple sorted assignment
         all_ids = sorted(active_ids, key=lambda c: (race_counts[c], random.random()))
-        boat_a = all_ids[:12]
-        boat_b = all_ids[12:]
+        boat_a = all_ids[:positions_per_boat]
+        boat_b = all_ids[positions_per_boat:]
     
     # Verify and fix boundary constraints if violated
     if boat_a_forbidden:
@@ -364,8 +374,14 @@ def _find_round_assignment(
             forbidden_in_b.sort(key=lambda c: (race_counts[c], random.random()))
             boat_b = safe_in_b[:4] + forbidden_in_b + safe_in_b[4:]
     
-    # Optimize ordering to minimize teammate conflicts
-    chain = [[0,1,2,3], [2,3,4,5], [4,5,6,7], [6,7,8,9], [8,9,10,11], [10,11,0,1]]
+    # 10-position chain structure for conflict counting
+    chain = [
+        [0, 1, 2, 3],
+        [2, 3, 4, 5],
+        [4, 5, 6, 7],
+        [6, 7, 8, 9],
+        [8, 9, 0, 1],
+    ]
     
     def count_conflicts(ordering: list[int]) -> int:
         conflicts = 0
@@ -393,14 +409,14 @@ def _find_round_assignment(
     
     for _ in range(1000):
         new_a = best_a[:]
-        # Only swap within safe zone (0-3) or within rest (4-11) to maintain constraint
+        # Only swap within safe zone (0-3) or within rest (4-9) to maintain constraint
         if boat_a_forbidden:
             if random.random() < 0.3:
                 i, j = random.sample(range(4), 2)
             else:
-                i, j = random.sample(range(4, 12), 2)
+                i, j = random.sample(range(4, positions_per_boat), 2)
         else:
-            i, j = random.sample(range(12), 2)
+            i, j = random.sample(range(positions_per_boat), 2)
         new_a[i], new_a[j] = new_a[j], new_a[i]
         
         if is_valid_a(new_a):
@@ -419,9 +435,9 @@ def _find_round_assignment(
             if random.random() < 0.3:
                 i, j = random.sample(range(4), 2)
             else:
-                i, j = random.sample(range(4, 12), 2)
+                i, j = random.sample(range(4, positions_per_boat), 2)
         else:
-            i, j = random.sample(range(12), 2)
+            i, j = random.sample(range(positions_per_boat), 2)
         new_b[i], new_b[j] = new_b[j], new_b[i]
         
         if is_valid_b(new_b):
@@ -438,18 +454,10 @@ def _generate_chain_races_careful(
     race_numbers: list[int],
     boat_competitors: list[Competitor],
     used_teammates: dict[int, set[int]],
+    chain: list[list[int]],
 ) -> list[Race] | None:
     """Generate chain races with careful teammate selection."""
     races: list[Race] = []
-    
-    chain = [
-        [0, 1, 2, 3],
-        [2, 3, 4, 5],
-        [4, 5, 6, 7],
-        [6, 7, 8, 9],
-        [8, 9, 10, 11],
-        [10, 11, 0, 1],
-    ]
     
     for race_idx, race_num in enumerate(race_numbers):
         indices = chain[race_idx]

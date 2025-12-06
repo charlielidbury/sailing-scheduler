@@ -95,9 +95,13 @@ class Schedule:
 
 
 # Constants for the current competition
-NUM_COMPETITORS = 25
-NUM_RACES = 96
-RACES_PER_COMPETITOR = 16  # Target for those who never sit out
-MIN_RACES_PER_COMPETITOR = 14  # For those who sit out once
-COMPETITORS_PER_ROUND = 24  # Chain structure needs exactly 24
+NUM_COMPETITORS = 23
+NUM_RACES = 90
+# 9 rounds total, 3 sit-outs per round = 27 total sit-outs
+# 27 ÷ 23 = 1.17 → some sit out once (16 races), some twice (14 races)
+# 4 people sit out twice (14 races), 19 sit out once (16 races)
+RACES_PER_COMPETITOR = 16  # Max (sits out once)
+MIN_RACES_PER_COMPETITOR = 14  # Min (sits out twice)
+COMPETITORS_PER_ROUND = 20  # 10 positions per boat × 2 boats
+POSITIONS_PER_BOAT = 10  # 10-position chain structure
 

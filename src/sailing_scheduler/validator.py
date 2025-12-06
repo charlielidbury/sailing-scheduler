@@ -10,9 +10,11 @@ from collections import Counter
 from dataclasses import dataclass
 
 from .models import (
+    COMPETITORS_PER_ROUND,
     MIN_RACES_PER_COMPETITOR,
     NUM_COMPETITORS,
     NUM_RACES,
+    POSITIONS_PER_BOAT,
     RACES_PER_COMPETITOR,
     BoatSet,
     Competitor,
@@ -271,8 +273,12 @@ def check_schedule_balance(schedule: Schedule) -> ValidationResult:
     At regular intervals, all competitors should have raced similar amounts.
     With sit-out rotation (most races sits out), spread should be at most 2.
     """
-    # Check at every round boundary (12 races per round)
-    checkpoints = list(range(12, NUM_RACES + 1, 12))
+    # Calculate races per round dynamically based on chain structure
+    # 5 groups × 2 boats = 10 races per round for 10-position chain
+    races_per_round = (POSITIONS_PER_BOAT // 2) * 2  # 5 groups per boat × 2 boats
+    
+    # Check at every round boundary
+    checkpoints = list(range(races_per_round, NUM_RACES + 1, races_per_round))
     errors = []
     max_acceptable_spread = 2  # Guaranteed by "most races sits out" strategy
     
@@ -309,13 +315,22 @@ def check_round_structure(schedule: Schedule) -> ValidationResult:
     """
     Requirement 6: Schedule should have round structure.
     
-    With 25 competitors and sit-out rotation:
-    - 24 competitors race exactly twice per round
-    - 1 competitor sits out (0 races) per round
+    With sit-out rotation:
+    - COMPETITORS_PER_ROUND competitors race exactly twice per round
+    - (NUM_COMPETITORS - COMPETITORS_PER_ROUND) competitors sit out (0 races) per round
+    
+    For 23 competitors with 10-position chain (20 per round):
+    - 20 competitors race twice per round
+    - 3 competitors sit out per round
     """
-    races_per_round = 12
+    # Calculate races per round dynamically
+    races_per_round = (POSITIONS_PER_BOAT // 2) * 2  # 5 groups per boat × 2 boats = 10
     num_rounds = NUM_RACES // races_per_round
     errors = []
+    
+    # Calculate expected sit-outs
+    expected_sit_outs = NUM_COMPETITORS - COMPETITORS_PER_ROUND
+    expected_racing = COMPETITORS_PER_ROUND
     
     for round_num in range(num_rounds):
         start_idx = round_num * races_per_round
@@ -343,17 +358,14 @@ def check_round_structure(schedule: Schedule) -> ValidationResult:
             else:
                 invalid_counts.append((competitor.name, count))
         
-        # With 25 competitors: expect 1 sit-out (0 races), 24 racing (2 races each)
-        expected_sit_outs = NUM_COMPETITORS - 24  # 1 for 25 competitors
-        
         if count_distribution[0] != expected_sit_outs:
             errors.append(
                 f"Round {round_num + 1}: {count_distribution[0]} sit-outs (expected {expected_sit_outs})"
             )
         
-        if count_distribution[2] != 24:
+        if count_distribution[2] != expected_racing:
             errors.append(
-                f"Round {round_num + 1}: {count_distribution[2]} racing twice (expected 24)"
+                f"Round {round_num + 1}: {count_distribution[2]} racing twice (expected {expected_racing})"
             )
         
         for name, count in invalid_counts:
